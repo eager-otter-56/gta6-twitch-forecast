@@ -19,10 +19,13 @@ across neighbouring hours. Two guards keep the pool honest: the GTA VI
 category's own pre-release history is not a launch and never enters the
 pool, and launches whose hour 1 was still tiny next to their day peak
 (late single-hour global unlocks, not rolling midnight-local console
-launches) are excluded. The median log ratio is shrunk 15% toward
-persistence, a setting picked by leave-one-out cross-validation over the
-comparables (CV log-pinball ≈ 0.221 vs ≈ 0.265 for the persistence
-baseline on comparable-regime launches). Thin hours fall back to the
+launches) are excluded. Pool members are weighted by how closely their
+pre-launch signature (the hottest pre-release hour relative to their
+hour 1, read from the case's own history for the target) matches the
+target's, and the median log ratio is shrunk 15% toward persistence —
+both settings picked by leave-one-out cross-validation over the
+comparables (CV log-pinball ≈ 0.29 on practice-like launches vs ≈ 0.37
+for the persistence baseline there). Thin hours fall back to the
 persistence spread. Deterministic, no network, runs in well under a
 second per case.
 

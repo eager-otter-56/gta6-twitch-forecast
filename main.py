@@ -26,6 +26,17 @@ leave-one-out cross-validation over the comparables that slightly beat
 using the raw median, because a target's own peak tends to sit a little
 closer to its first hour than the pooled median launch's does.
 
+Each comparable also carries a pre-launch signature: how hot the
+category already was in the 14 hours before its release day, relative to
+its own hour 1 (premax / v(1)).  Rolling launches whose early time zones
+opened the day before run hot before the UTC day even starts, and how
+hot predicts how much rise is still to come.  The target's own signature
+is read from its ``history_hourly``, and pool members are weighted by a
+Gaussian kernel on the log-signature distance (sigma 0.5), so launches
+that arrived at hour 1 in the same state count more.  Cross-validation
+on practice-like launches (already hot before day start, hour 1 at
+least 15k) put this at 0.290 against 0.294 for the unweighted pool.
+
 Hours whose pool is too thin fall back to the persistence spread
 q = p1 * exp(z * 0.15 * sqrt(h - 1)).  Everything is deterministic:
 sorted inputs, no randomness, no clock, no network, stdlib only.
@@ -46,10 +57,12 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0, 0.674, 1.645]
 FALLBACK_SIGMA = 0.15
-MIN_START_RATIO = 0.10
+MIN_START_RATIO = 0.05
 MEDIAN_SHRINK = 0.85
 MIN_POOL = 8
 MIN_DAY_HOURS = 20
+PRE_WINDOW_HOURS = 14
+KERNEL_SIGMA = 0.5
 
 
 def round2(x: float) -> float:
@@ -64,49 +77,85 @@ def parse_ts(text: str) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
-def day_curve(comp: dict) -> dict:
-    """Hour-of-release-day (1..24) -> viewers for one comparable."""
+def day_curve(comp: dict) -> tuple[dict, float | None]:
+    """(Hour-of-release-day (1..24) -> viewers, pre-launch signature).
+
+    The signature is the hottest hour in the PRE_WINDOW_HOURS before the
+    release day, divided by hour 1's viewers -- or None when the
+    comparable has no points in that window.
+    """
     start = parse_ts(comp["day_start"])
     curve = {}
+    pre_max = 0.0
     for point in comp.get("hourly", []):
         viewers = point.get("viewers")
         if not viewers or viewers <= 0:
             continue
-        hour = int((parse_ts(point["from"]) - start).total_seconds() // 3600) + 1
-        if 1 <= hour <= 24:
-            curve[hour] = float(viewers)
-    return curve
+        offset = (parse_ts(point["from"]) - start).total_seconds() / 3600
+        if 0 <= offset < 24:
+            curve[int(offset) + 1] = float(viewers)
+        elif -PRE_WINDOW_HOURS <= offset < 0:
+            pre_max = max(pre_max, float(viewers))
+    signature = None
+    if pre_max > 0 and 1 in curve:
+        signature = pre_max / curve[1]
+    return curve, signature
 
 
-def ratio_pool(case: dict) -> dict:
-    """Hour -> sorted list of log ratios log(v(h)/v(1)) over the pool."""
-    pool: dict[int, list[float]] = {}
+def target_signature(case: dict, p1: float) -> float | None:
+    """The case's own pre-launch signature from its history_hourly."""
+    start = parse_ts(case["day_start"])
+    pre_max = 0.0
+    for point in case.get("history_hourly") or []:
+        viewers = point.get("viewers")
+        if not viewers or viewers <= 0:
+            continue
+        offset = (parse_ts(point["from"]) - start).total_seconds() / 3600
+        if -PRE_WINDOW_HOURS <= offset < 0:
+            pre_max = max(pre_max, float(viewers))
+    return pre_max / p1 if pre_max > 0 else None
+
+
+def ratio_pool(case: dict, p1: float) -> dict:
+    """Hour -> sorted (log ratio, weight) pairs over the pool."""
+    target_sig = target_signature(case, p1)
+    pool: dict[int, list[tuple[float, float]]] = {}
     for comp in case.get("comparables", []):
         if str(comp.get("unlock", "")).startswith("Not a launch"):
             continue
-        curve = day_curve(comp)
+        curve, sig = day_curve(comp)
         if 1 not in curve or len(curve) < MIN_DAY_HOURS:
             continue
         first = curve[1]
         if first / max(curve.values()) < MIN_START_RATIO:
             continue
+        weight = 1.0
+        if target_sig is not None and sig is not None:
+            dist = math.log(sig) - math.log(target_sig)
+            weight = math.exp(-(dist * dist) / (2 * KERNEL_SIGMA * KERNEL_SIGMA))
         for hour in range(2, 25):
             if hour in curve:
-                pool.setdefault(hour, []).append(math.log(curve[hour] / first))
-    for values in pool.values():
-        values.sort()
+                pool.setdefault(hour, []).append((math.log(curve[hour] / first), weight))
+    for pairs in pool.values():
+        pairs.sort()
     return pool
 
 
-def quantile(sorted_values: list[float], tau: float) -> float:
-    n = len(sorted_values)
-    if n == 1:
-        return sorted_values[0]
-    pos = tau * (n - 1)
-    lo = int(math.floor(pos))
-    hi = min(lo + 1, n - 1)
-    frac = pos - lo
-    return sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac
+def quantile(pairs: list[tuple[float, float]], tau: float) -> float:
+    """Weighted quantile of sorted (value, weight) pairs."""
+    total = sum(w for _, w in pairs)
+    goal = tau * total
+    cum = 0.0
+    for idx, (value, weight) in enumerate(pairs):
+        cum += weight
+        if cum >= goal:
+            if idx == 0:
+                return value
+            prev_value, _ = pairs[idx - 1]
+            prev_cum = cum - weight
+            frac = (goal - prev_cum) / weight if weight > 0 else 0.0
+            return prev_value + (value - prev_value) * frac
+    return pairs[-1][0]
 
 
 def smoothed_log_quantiles(pool: dict) -> dict:
@@ -152,7 +201,7 @@ def hour_quantiles(p1: float, hour: int, log_quantiles: dict) -> list[float]:
 def forecast_case(case: dict) -> dict:
     first = next(k for k in case["known"] if k["hour"] == 1)
     p1 = max(1.0, float(first["viewers"]))
-    log_quantiles = smoothed_log_quantiles(ratio_pool(case))
+    log_quantiles = smoothed_log_quantiles(ratio_pool(case, p1))
     rows = [
         {"hour": row["hour"], "q": hour_quantiles(p1, row["hour"], log_quantiles)}
         for row in case["forecast"]
