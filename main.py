@@ -21,7 +21,7 @@ Two guards keep the pool honest:
   launches this contest is about.  Their ratios explode by orders of
   magnitude and would blow up the upper quantiles, so they are left out.
 
-The median log ratio is shrunk 15% toward zero (plain persistence): in
+The median log ratio is shrunk 10% toward zero (plain persistence): in
 leave-one-out cross-validation over the comparables that slightly beat
 using the raw median, because a target's own peak tends to sit a little
 closer to its first hour than the pooled median launch's does.
@@ -32,10 +32,12 @@ its own hour 1 (premax / v(1)).  Rolling launches whose early time zones
 opened the day before run hot before the UTC day even starts, and how
 hot predicts how much rise is still to come.  The target's own signature
 is read from its ``history_hourly``, and pool members are weighted by a
-Gaussian kernel on the log-signature distance (sigma 0.5), so launches
+Gaussian kernel on the log-signature distance (sigma 0.7), so launches
 that arrived at hour 1 in the same state count more.  Cross-validation
 on practice-like launches (already hot before day start, hour 1 at
-least 15k) put this at 0.290 against 0.294 for the unweighted pool.
+least 15k) put this at 0.288 against 0.294 for the unweighted pool,
+and the first submitted version of this entry (no weighting) scored
+0.320498 on the practice cases against 0.274209 for the weighted one.
 
 Hours whose pool is too thin fall back to the persistence spread
 q = p1 * exp(z * 0.15 * sqrt(h - 1)).  Everything is deterministic:
@@ -58,11 +60,11 @@ LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0, 0.674, 1.645]
 FALLBACK_SIGMA = 0.15
 MIN_START_RATIO = 0.05
-MEDIAN_SHRINK = 0.85
+MEDIAN_SHRINK = 0.90
 MIN_POOL = 8
 MIN_DAY_HOURS = 20
 PRE_WINDOW_HOURS = 14
-KERNEL_SIGMA = 0.5
+KERNEL_SIGMA = 0.7
 
 
 def round2(x: float) -> float:
